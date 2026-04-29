@@ -43,6 +43,52 @@ def read_lines(path: Path) -> list[str]:
         return [line.rstrip("\n") for line in handle]
 
 
+def is_raw_10x_h5_valid(target_dir: Path) -> bool:
+    """Check whether the target folder contains a readable raw 10x-style H5 file."""
+    path = target_dir / "raw_feature_bc_matrix.h5"
+    if not path.is_file():
+        return False
+
+    try:
+        with h5py.File(path, "r") as h5:
+            if "matrix" not in h5:
+                return False
+            matrix_group = h5["matrix"]
+
+            required_matrix_datasets = {"barcodes", "data", "indices", "indptr", "shape"}
+            if not required_matrix_datasets.issubset(matrix_group.keys()):
+                return False
+
+            if "features" not in matrix_group:
+                return False
+            features_group = matrix_group["features"]
+
+            required_feature_datasets = {"id", "name", "feature_type", "genome", "_all_tag_keys"}
+            if not required_feature_datasets.issubset(features_group.keys()):
+                return False
+
+            shape = matrix_group["shape"][()]
+            if len(shape) != 2:
+                return False
+
+            n_features, n_barcodes = shape
+            if len(matrix_group["barcodes"]) != n_barcodes:
+                return False
+            if len(features_group["id"]) != n_features:
+                return False
+            if len(features_group["name"]) != n_features:
+                return False
+            if len(features_group["feature_type"]) != n_features:
+                return False
+            if len(matrix_group["data"]) != len(matrix_group["indices"]):
+                return False
+            if len(matrix_group["indptr"]) != n_barcodes + 1:
+                return False
+        return True
+    except (OSError, KeyError, TypeError, ValueError):
+        return False
+
+
 def write_h5(sample_dir: Path) -> None:
     # Find the three required 10x-style files for this sample.
     matrix_path = first_existing(sample_dir / "matrix.mtx.gz", sample_dir / "matrix.mtx")
@@ -99,6 +145,10 @@ def main() -> None:
     for sample_dir in sample_dirs:
         if not sample_dir.is_dir():
             raise FileNotFoundError(f"Sample directory not found: {sample_dir}")
+        target_folder_name = RAW_H5_DIR / sample_dir.name
+        if is_raw_10x_h5_valid(target_folder_name):
+            print(f"Skipping {sample_dir.name}: H5 file already exists and is valid.")
+            continue
         write_h5(sample_dir)
 
 
