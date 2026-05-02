@@ -1,16 +1,22 @@
-"""Convert arranged 10x matrix/barcode/feature triplet files into raw H5 files.
+"""Convert arranged 10x matrix/barcode/feature triplet files into H5 files.
 
 Input:
     data/raw/<sample>/matrix.mtx[.gz]
     data/raw/<sample>/barcodes.tsv[.gz]
     data/raw/<sample>/features.tsv[.gz]
+    data/processed/<sample>/matrix.mtx[.gz]
+    data/processed/<sample>/barcodes.tsv[.gz]
+    data/processed/<sample>/features.tsv[.gz]
 
 Output:
     data/raw_h5/<sample>/raw_feature_bc_matrix.h5
+    data/filtered_h5/<sample>/filtered_feature_bc_matrix.h5
 
 Usage:
-    python scripts/02_make_raw_h5.py
-    SAMPLE_NAME=<sample> python scripts/02_make_raw_h5.py
+    python3 scripts/02_make_raw_h5.py
+    SAMPLE_NAME=<sample> python3 scripts/02_make_raw_h5.py
+    COUNT_TYPE=raw python3 scripts/02_make_raw_h5.py
+    COUNT_TYPE=processed python3 scripts/02_make_raw_h5.py
 """
 
 import gzip
@@ -26,6 +32,21 @@ from scipy.sparse import csc_matrix
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RAW_DIR = REPO_ROOT / "data" / "raw"
 RAW_H5_DIR = REPO_ROOT / "data" / "raw_h5"
+PROCESSED_DIR = REPO_ROOT / "data" / "processed"
+FILTERED_H5_DIR = REPO_ROOT / "data" / "filtered_h5"
+
+COUNT_CONFIGS = {
+    "raw": {
+        "input_dir": RAW_DIR,
+        "output_dir": RAW_H5_DIR,
+        "h5_name": "raw_feature_bc_matrix.h5",
+    },
+    "processed": {
+        "input_dir": PROCESSED_DIR,
+        "output_dir": FILTERED_H5_DIR,
+        "h5_name": "filtered_feature_bc_matrix.h5",
+    },
+}
 
 
 def first_existing(*paths: Path) -> Path:
@@ -43,9 +64,8 @@ def read_lines(path: Path) -> list[str]:
         return [line.rstrip("\n") for line in handle]
 
 
-def is_raw_10x_h5_valid(target_dir: Path) -> bool:
-    """Check whether the target folder contains a readable raw 10x-style H5 file."""
-    path = target_dir / "raw_feature_bc_matrix.h5"
+def is_10x_h5_valid(path: Path) -> bool:
+    """Check whether a path contains a readable 10x-style H5 file."""
     if not path.is_file():
         return False
 
@@ -89,7 +109,7 @@ def is_raw_10x_h5_valid(target_dir: Path) -> bool:
         return False
 
 
-def write_h5(sample_dir: Path) -> None:
+def write_h5(sample_dir: Path, output_path: Path) -> None:
     # Find the three required 10x-style files for this sample.
     matrix_path = first_existing(sample_dir / "matrix.mtx.gz", sample_dir / "matrix.mtx")
     barcode_path = first_existing(sample_dir / "barcodes.tsv.gz", sample_dir / "barcodes.tsv")
@@ -115,8 +135,7 @@ def write_h5(sample_dir: Path) -> None:
     feature_names = [row[1] if len(row) > 1 else row[0] for row in features]
     feature_types = [row[2] if len(row) > 2 else "Gene Expression" for row in features]
 
-    # Write the minimal 10x-like raw_feature_bc_matrix.h5 structure.
-    output_path = RAW_H5_DIR / sample_dir.name / "raw_feature_bc_matrix.h5"
+    # Write the minimal 10x-like H5 structure.
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with h5py.File(output_path, "w") as h5:
@@ -137,19 +156,60 @@ def write_h5(sample_dir: Path) -> None:
     print(f"Wrote {output_path}")
 
 
+def iter_sample_dirs(input_dir: Path, sample_name: str | None) -> list[Path]:
+    """Return selected sample directories for one count type."""
+    if sample_name:
+        return [input_dir / sample_name]
+
+    if not input_dir.exists():
+        return []
+
+    return sorted(path for path in input_dir.iterdir() if path.is_dir())
+
+
+def convert_count_type(count_type: str, sample_name: str | None) -> int:
+    """Convert all selected samples for one count type; return number converted."""
+    config = COUNT_CONFIGS[count_type]
+    input_dir = config["input_dir"]
+    output_dir = config["output_dir"]
+    h5_name = config["h5_name"]
+    sample_dirs = iter_sample_dirs(input_dir, sample_name)
+
+    if sample_name and not sample_dirs[0].is_dir():
+        raise FileNotFoundError(f"{count_type} sample directory not found: {sample_dirs[0]}")
+
+    converted_count = 0
+    for sample_dir in sample_dirs:
+        output_path = output_dir / sample_dir.name / h5_name
+        if is_10x_h5_valid(output_path):
+            print(f"Skipping {count_type} {sample_dir.name}: H5 file already exists and is valid.")
+            continue
+
+        write_h5(sample_dir, output_path)
+        converted_count += 1
+
+    return converted_count
+
+
 def main() -> None:
     # Convert one sample if SAMPLE_NAME is set; otherwise convert every sample.
+    # COUNT_TYPE can be raw, processed, or all.
     sample_name = os.environ.get("SAMPLE_NAME")
-    sample_dirs = [RAW_DIR / sample_name] if sample_name else sorted(path for path in RAW_DIR.iterdir() if path.is_dir())
+    count_type = os.environ.get("COUNT_TYPE", "all").lower()
 
-    for sample_dir in sample_dirs:
-        if not sample_dir.is_dir():
-            raise FileNotFoundError(f"Sample directory not found: {sample_dir}")
-        target_folder_name = RAW_H5_DIR / sample_dir.name
-        if is_raw_10x_h5_valid(target_folder_name):
-            print(f"Skipping {sample_dir.name}: H5 file already exists and is valid.")
-            continue
-        write_h5(sample_dir)
+    if count_type == "all":
+        count_types = ["raw", "processed"]
+    elif count_type in COUNT_CONFIGS:
+        count_types = [count_type]
+    else:
+        raise ValueError("COUNT_TYPE must be raw, processed, or all")
+
+    total_converted = 0
+    for selected_count_type in count_types:
+        total_converted += convert_count_type(selected_count_type, sample_name)
+
+    if total_converted == 0:
+        print("No H5 files needed conversion.")
 
 
 if __name__ == "__main__":
