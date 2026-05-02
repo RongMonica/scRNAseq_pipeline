@@ -1,28 +1,19 @@
 """Create per-sample QC-ready AnnData files from 10x-style H5 matrices.
 
-Default input priority:
-    1. data/filtered_h5/<sample>/filtered_feature_bc_matrix.h5
-       - use directly for QC
-    2. data/clean_data/<sample>/<sample>_cellbender.h5
-       - use existing CellBender output for QC
-
-With PREFER_CELLBENDER=yes:
-    1. data/clean_data/<sample>/<sample>_cellbender.h5
-       - use existing CellBender output for QC
+Input:
+    User-provided directory containing 10x-style .h5 files.
 
 Output:
     results/qc/<sample>.h5ad
 
 Usage:
-    python scripts/05_qc.py
-
-Prefer existing CellBender output when both filtered and CellBender H5 files
-are available:
-    PREFER_CELLBENDER=yes python scripts/05_qc.py
+    python3 scripts/05_qc.py data/filtered_h5
+    python3 scripts/05_qc.py data/clean_data
+    python3 scripts/05_qc.py /path/to/h5_directory --output-dir results/qc
 """
 
+import argparse
 from pathlib import Path
-import os
 
 import anndata as ad
 import h5py
@@ -31,17 +22,7 @@ import pandas as pd
 from scipy.sparse import csc_matrix
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = REPO_ROOT / "data"
-CLEAN_DATA_DIR = DATA_DIR / "clean_data"
-FILTERED_H5_DIR = DATA_DIR / "filtered_h5"
-PREPROCESS_DIR = REPO_ROOT / "results" / "preprocess"
 OUTPUT_DIR = REPO_ROOT / "results" / "qc"
-PREFER_CELLBENDER = os.environ.get("PREFER_CELLBENDER", "no").lower() in {
-    "1",
-    "true",
-    "yes",
-    "y",
-}
 
 def decode_strings(values) -> list[str]:
     return [
@@ -49,62 +30,73 @@ def decode_strings(values) -> list[str]:
         for value in values
     ]
 
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Create per-sample QC-ready AnnData files from 10x-style H5 matrices."
+    )
+    parser.add_argument(
+        "input_dir",
+        type=Path,
+        help="Directory containing .h5 files to process. Search is recursive within this directory only.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=OUTPUT_DIR,
+        help="Directory for output .h5ad files. Default: results/qc.",
+    )
+    return parser.parse_args()
+
+
 def sample_id_from_h5_path(path: Path) -> str:
     # STARsolo paths are usually:
     # results/preprocess/<sample>/Solo.out/Gene/filtered/filtered_feature_bc_matrix.h5
     # For this layout, the sample name is several parents above the H5 file.
     if (
-        path.parent.name == "filtered"
-        and len(path.parents) > 4
-        and path.parents[4] == PREPROCESS_DIR
+        path.name in {"filtered_feature_bc_matrix.h5", "raw_feature_bc_matrix.h5"}
+        and path.parent.name in {"filtered", "raw"}
+        and len(path.parents) > 3
+        and path.parents[2].name == "Solo.out"
     ):
         return path.parents[3].name
 
-    # For existing _h5 files that transfered from triplets from 01_arrange_triplet_counts.sh (Path B)
-    # data/filtered_h5/<sample>/..., the sample name is simply the parent
-    # directory.
-    return path.parent.name
+    if path.name.endswith("_cellbender.h5"):
+        return path.name.removesuffix("_cellbender.h5")
 
-def find_filtered_h5_files() -> dict[str, Path]:
+    if path.name in {"filtered_feature_bc_matrix.h5", "raw_feature_bc_matrix.h5"}:
+        return path.parent.name
+
+    return path.stem
+
+
+def find_h5_files(input_dir: Path) -> dict[str, Path]:
+    if not input_dir.is_dir():
+        raise FileNotFoundError(f"Input directory not found: {input_dir}")
+
     sample_files: dict[str, Path] = {}
+    duplicate_samples: dict[str, list[Path]] = {}
 
-    # Search specific H5 folders first, then broader pipeline output folders.
-    # setdefault keeps the first match for each sample.
-    search_roots = [FILTERED_H5_DIR, PREPROCESS_DIR, DATA_DIR]
-
-    for root in search_roots:
-        if not root.exists():
+    for path in sorted(input_dir.rglob("*.h5")):
+        sample_id = sample_id_from_h5_path(path)
+        if sample_id in sample_files:
+            duplicate_samples.setdefault(sample_id, [sample_files[sample_id]]).append(path)
             continue
-        for path in sorted(root.rglob("filtered_feature_bc_matrix.h5")):
-            sample_files.setdefault(sample_id_from_h5_path(path), path)
-    return sample_files
-
-def find_cellbender_h5_files() -> dict[str, Path]:
-    sample_files: dict[str, Path] = {}
-
-    if not CLEAN_DATA_DIR.exists():
-        return sample_files
-
-    for path in sorted(CLEAN_DATA_DIR.glob("*/*_cellbender.h5")):
-        sample_id = path.name.removesuffix("_cellbender.h5")
         sample_files[sample_id] = path
-    return sample_files
 
-def get_sample_files() -> dict[str, Path]:
-    filtered_files = find_filtered_h5_files()
-    cellbender_files = find_cellbender_h5_files()
-    sample_files: dict[str, Path] = {}
-
-    if PREFER_CELLBENDER:
-        sample_files.update(cellbender_files)
-        for sample_id, filtered_path in filtered_files.items():
-            sample_files.setdefault(sample_id, filtered_path)
-    else:
-        sample_files.update(filtered_files)
-        for sample_id, cellbender_path in cellbender_files.items():
-            sample_files.setdefault(sample_id, cellbender_path)
+    if duplicate_samples:
+        details = "\n".join(
+            f"{sample_id}: {', '.join(str(path) for path in paths)}"
+            for sample_id, paths in sorted(duplicate_samples.items())
+        )
+        raise ValueError(
+            "Multiple .h5 files resolved to the same sample ID. "
+            "Point to a narrower directory or rename files:\n"
+            f"{details}"
+        )
 
     return sample_files
+
 
 def read_10x_h5(h5_path: Path) -> ad.AnnData:
     with h5py.File(h5_path, "r") as handle:
@@ -125,16 +117,16 @@ def read_10x_h5(h5_path: Path) -> ad.AnnData:
         gene_symbols = decode_strings(features_group["name"][:])
         feature_types = decode_strings(features_group["feature_type"][:])
 
-    adata = ad.AnnData(X=matrix)
-    adata.obs_names = pd.Index(barcodes, dtype="string")
-    adata.var = pd.DataFrame(
+    obs = pd.DataFrame(index=pd.Index(barcodes))
+    var = pd.DataFrame(
         {
             "gene_id": gene_ids,
             "gene_symbol": gene_symbols,
             "feature_type": feature_types,
-        }
+        },
+        index=pd.Index(gene_symbols),
     )
-    adata.var_names = pd.Index(gene_symbols, dtype="string")
+    adata = ad.AnnData(X=matrix, obs=obs, var=var)
     adata.var_names_make_unique()
     return adata
 
@@ -160,22 +152,23 @@ def load_sample(sample_id: str, h5_path: Path) -> ad.AnnData:
     adata.obs["total_counts"] = total_counts
     adata.obs["n_genes_by_counts"] = n_genes_by_counts
     adata.obs["pct_counts_mt"] = pct_counts_mt
-    adata.var["mt"] = mt_mask.to_numpy()
+    adata.var["mt"] = np.asarray(mt_mask)
     adata.uns["source_h5"] = str(h5_path)
     return adata
 
 def main() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    args = parse_args()
+    input_dir = args.input_dir.expanduser().resolve()
+    output_dir = args.output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    sample_files = get_sample_files()
+    sample_files = find_h5_files(input_dir)
     if not sample_files:
-        raise FileNotFoundError(
-            "No filtered_feature_bc_matrix.h5 or existing CellBender H5 files found"
-        )
+        raise FileNotFoundError(f"No .h5 files found in {input_dir}")
 
     for sample_id, h5_path in sample_files.items():
         adata = load_sample(sample_id, h5_path)
-        adata.write_h5ad(OUTPUT_DIR / f"{sample_id}.h5ad")
+        adata.write_h5ad(output_dir / f"{sample_id}.h5ad")
         print(f"Wrote {sample_id}.h5ad from {h5_path.name} with shape {adata.shape}")
 
 
