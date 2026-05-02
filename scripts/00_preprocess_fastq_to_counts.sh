@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-# Convert one pair of 10x FASTQ files into STARsolo count matrices.
+# Path A: Convert one pair of 10x FASTQ files into STARsolo count matrices.
 #
 # Usage:
 #   SAMPLE_NAME=AML_sample01 \
