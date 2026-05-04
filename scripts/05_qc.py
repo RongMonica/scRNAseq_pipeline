@@ -5,6 +5,8 @@ Input:
 
 Output:
     results/qc/<sample>.h5ad
+    results/qc/qc_summary.tsv
+    plots/qc/<sample>_qc.png
 
 Usage:
     python3 scripts/05_qc.py data/filtered_h5
@@ -17,12 +19,15 @@ from pathlib import Path
 
 import anndata as ad
 import h5py
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.sparse import csc_matrix
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = REPO_ROOT / "results" / "qc"
+PLOTS_DIR = REPO_ROOT / "plots" / "qc"
+
 
 def decode_strings(values) -> list[str]:
     return [
@@ -45,6 +50,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=OUTPUT_DIR,
         help="Directory for output .h5ad files. Default: results/qc.",
+    )
+    parser.add_argument(
+        "--plots-dir",
+        type=Path,
+        default=PLOTS_DIR,
+        help="Directory for output QC plots. Default: plots/qc.",
     )
     return parser.parse_args()
 
@@ -130,6 +141,7 @@ def read_10x_h5(h5_path: Path) -> ad.AnnData:
     adata.var_names_make_unique()
     return adata
 
+
 def load_sample(sample_id: str, h5_path: Path) -> ad.AnnData:
     adata = read_10x_h5(h5_path)
     mt_mask = adata.var_names.str.upper().str.startswith("MT-")
@@ -156,20 +168,98 @@ def load_sample(sample_id: str, h5_path: Path) -> ad.AnnData:
     adata.uns["source_h5"] = str(h5_path)
     return adata
 
+
+def summarize_qc(sample_id: str, adata: ad.AnnData) -> dict[str, object]:
+    obs = adata.obs
+    return {
+        "sample_id": sample_id,
+        "n_cells": adata.n_obs,
+        "n_genes": adata.n_vars,
+        "median_total_counts": float(np.median(obs["total_counts"])),
+        "p05_total_counts": float(np.quantile(obs["total_counts"], 0.05)),
+        "p95_total_counts": float(np.quantile(obs["total_counts"], 0.95)),
+        "median_n_genes_by_counts": float(np.median(obs["n_genes_by_counts"])),
+        "p05_n_genes_by_counts": float(np.quantile(obs["n_genes_by_counts"], 0.05)),
+        "p95_n_genes_by_counts": float(np.quantile(obs["n_genes_by_counts"], 0.95)),
+        "median_pct_counts_mt": float(np.median(obs["pct_counts_mt"])),
+        "pct_cells_mt_gt_20": float((obs["pct_counts_mt"] > 20).mean() * 100),
+    }
+
+
+def write_qc_plot(sample_id: str, adata: ad.AnnData, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    obs = adata.obs
+    total_counts = obs["total_counts"]
+    n_genes = obs["n_genes_by_counts"]
+    pct_mt = obs["pct_counts_mt"]
+
+    fig, axes = plt.subplots(2, 2, figsize=(11, 9))
+
+    axes[0, 0].hist(total_counts, bins=80, color="#9ecae1", edgecolor="none")
+    axes[0, 0].set_title("Count depth")
+    axes[0, 0].set_xlabel("Total counts")
+    axes[0, 0].set_ylabel("Cells")
+
+    axes[0, 1].hist(n_genes, bins=80, color="#9ecae1", edgecolor="none")
+    axes[0, 1].set_title("Detected genes")
+    axes[0, 1].set_xlabel("Number of genes")
+    axes[0, 1].set_ylabel("Cells")
+
+    ranked_counts = np.sort(total_counts.to_numpy())[::-1]
+    axes[1, 0].plot(np.arange(1, len(ranked_counts) + 1), ranked_counts)
+    axes[1, 0].set_yscale("log")
+    axes[1, 0].set_title("Barcode rank")
+    axes[1, 0].set_xlabel("Barcode rank")
+    axes[1, 0].set_ylabel("Count depth")
+
+    scatter = axes[1, 1].scatter(
+        total_counts,
+        n_genes,
+        c=pct_mt,
+        s=2,
+        cmap="viridis",
+        alpha=0.5,
+    )
+    axes[1, 1].set_title("Genes vs count depth")
+    axes[1, 1].set_xlabel("Total counts")
+    axes[1, 1].set_ylabel("Number of genes")
+
+    cbar = fig.colorbar(scatter, ax=axes[1, 1])
+    cbar.set_label("Mitochondrial counts (%)")
+
+    fig.suptitle(sample_id)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
 def main() -> None:
     args = parse_args()
     input_dir = args.input_dir.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
+    plots_dir = args.plots_dir.expanduser().resolve()
+
     output_dir.mkdir(parents=True, exist_ok=True)
+    plots_dir.mkdir(parents=True, exist_ok=True)
 
     sample_files = find_h5_files(input_dir)
     if not sample_files:
         raise FileNotFoundError(f"No .h5 files found in {input_dir}")
 
+    summary_rows = []
     for sample_id, h5_path in sample_files.items():
         adata = load_sample(sample_id, h5_path)
+
         adata.write_h5ad(output_dir / f"{sample_id}.h5ad")
+        write_qc_plot(sample_id, adata, plots_dir / f"{sample_id}_qc.png")
+        summary_rows.append(summarize_qc(sample_id, adata))
+
         print(f"Wrote {sample_id}.h5ad from {h5_path.name} with shape {adata.shape}")
+
+    summary_path = output_dir / "qc_summary.tsv"
+    pd.DataFrame(summary_rows).to_csv(summary_path, sep="\t", index=False)
+    print(f"Wrote QC summary to {summary_path}")
 
 
 if __name__ == "__main__":
