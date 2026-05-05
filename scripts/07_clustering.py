@@ -146,6 +146,7 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
+    print(f"Reading normalized samples from {input_dir}...", flush=True)
     adata = read_normalized_samples(input_dir)
     adata.raw = adata
 
@@ -153,18 +154,33 @@ def main() -> None:
         raise KeyError(f"Batch key column not found in adata.obs: {args.batch_key}")
 
     hvg_batch_key = args.batch_key if adata.obs[args.batch_key].nunique() > 1 else None
+    print("Selecting highly variable gens...", flush=True)
     sc.pp.highly_variable_genes(
         adata,
         n_top_genes=args.n_top_genes,
         flavor="seurat",
         batch_key=hvg_batch_key,
     )
+
+    print("Subsetting to HVGs...", flush=True)
     adata = adata[:, adata.var["highly_variable"]].copy()
+
+    print(f"Running batch correction with method {args.batch_correction}...", flush=True)
     maybe_correct_batch(adata, args.batch_key, args.batch_correction)
-    sc.pp.scale(adata, max_value=10)
+
+    print("Scaling data...", flush=True)
+    sc.pp.scale(adata, max_value=10, zero_center=False)
+
+    print("Running PCA...", flush=True)
     sc.tl.pca(adata, svd_solver="arpack")
+
+    print("Building neighbor graph...", flush=True)
     sc.pp.neighbors(adata, n_pcs=args.n_pcs)
+
+    print("Computing UMAP...", flush=True)
     sc.tl.umap(adata)
+
+    print("Running Leiden clustering...", flush=True)
     sc.tl.leiden(adata, resolution=args.resolution, key_added="leiden")
 
     adata.uns["clustering"] = {
@@ -175,7 +191,10 @@ def main() -> None:
         "hvg_batch_key": hvg_batch_key,
     }
 
+    print(f"Writing clustered object to {output_path}...", flush=True)
     adata.write_h5ad(output_path)
+
+    print("Saving UMAP plots...", flush=True)
     save_umap(adata, "leiden", plots_dir / "umap_leiden.png")
     save_umap(adata, "sample_id", plots_dir / "umap_sample_id.png")
 
