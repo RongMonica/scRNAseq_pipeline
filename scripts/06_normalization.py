@@ -10,15 +10,15 @@ Output:
 Usage:
     python3 scripts/06_normalization.py
     python3 scripts/06_normalization.py --input-dir results/qc --output-dir results/normalized
+    python3 scripts/06_normalization.py --resume
 """
 
 import argparse
 from pathlib import Path
 
 import anndata as ad
-import numpy as np
 import pandas as pd
-from scipy import sparse
+import scanpy as sc
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +55,17 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=TARGET_SUM,
         help="Counts per cell after library-size normalization. Default: 10000.",
+    )
+    parser.add_argument(
+        "--compression",
+        choices=("gzip", "lzf", "none"),
+        default="gzip",
+        help="Compression for output .h5ad files. Default: gzip.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip output files that already exist and can be opened successfully.",
     )
     return parser.parse_args()
 
@@ -96,25 +107,41 @@ def qc_filter(adata: ad.AnnData, threshold: pd.Series | None) -> ad.AnnData:
 def normalize_log1p(adata: ad.AnnData, target_sum: float) -> ad.AnnData:
     adata.layers["counts"] = adata.X.copy()
 
-    counts_per_cell = np.asarray(adata.X.sum(axis=1)).ravel()
-    scale = np.divide(
-        target_sum,
-        counts_per_cell,
-        out=np.zeros_like(counts_per_cell, dtype=float),
-        where=counts_per_cell > 0,
-    )
-
-    if sparse.issparse(adata.X):
-        adata.X = adata.X.multiply(scale[:, None]).tocsr()
-        adata.X.data = np.log1p(adata.X.data)
-    else:
-        adata.X = np.log1p(adata.X * scale[:, None])
+    sc.pp.normalize_total(adata, target_sum=target_sum)
+    sc.pp.log1p(adata)
 
     adata.uns["normalization"] = {
-        "method": "library_size_normalize_log1p",
+        "method": "scanpy_normalize_total_log1p",
         "target_sum": target_sum,
     }
+
     return adata
+
+
+def is_readable_h5ad(path: Path) -> bool:
+    if not path.exists():
+        return False
+
+    try:
+        backed = ad.read_h5ad(path, backed="r")
+        backed.file.close()
+    except Exception:
+        return False
+
+    return True
+
+
+def write_h5ad(adata: ad.AnnData, output_path: Path, compression: str) -> None:
+    compression_arg = None if compression == "none" else compression
+    try:
+        adata.write_h5ad(output_path, compression=compression_arg)
+    except OSError as error:
+        if error.errno == 28 or "No space left on device" in str(error):
+            raise OSError(
+                f"No space left while writing {output_path}. "
+                "Free disk space, remove any partial output file, then rerun with --resume."
+            ) from error
+        raise
 
 
 def main() -> None:
@@ -133,12 +160,17 @@ def main() -> None:
 
     for h5ad_path in h5ad_files:
         sample_id = h5ad_path.stem
+        output_path = output_dir / f"{sample_id}.h5ad"
+        if args.resume and is_readable_h5ad(output_path):
+            print(f"Skipping {sample_id}.h5ad; readable output already exists")
+            continue
+
         adata = ad.read_h5ad(h5ad_path)
         n_cells_before = adata.n_obs
 
         adata = qc_filter(adata, get_threshold(sample_id, thresholds))
         adata = normalize_log1p(adata, args.target_sum)
-        adata.write_h5ad(output_dir / f"{sample_id}.h5ad")
+        write_h5ad(adata, output_path, args.compression)
 
         print(
             f"Wrote {sample_id}.h5ad: "
