@@ -17,6 +17,7 @@ import argparse
 from pathlib import Path
 
 import anndata as ad
+import scanpy as sc
 import matplotlib.pyplot as plt
 
 
@@ -78,14 +79,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def require_scanpy():
-    try:
-        import scanpy as sc
-    except ImportError as error:
-        raise ImportError("This script requires scanpy. Install scanpy before clustering.") from error
-    return sc
-
-
 def read_normalized_samples(input_dir: Path) -> ad.AnnData:
     h5ad_files = sorted(
         path
@@ -104,14 +97,14 @@ def read_normalized_samples(input_dir: Path) -> ad.AnnData:
     return ad.concat(samples, join="inner", merge="same", index_unique="-")
 
 
-def save_umap(sc, adata: ad.AnnData, color: str, output_path: Path) -> None:
+def save_umap(adata: ad.AnnData, color: str, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sc.pl.umap(adata, color=color, frameon=False, show=False)
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close()
 
 
-def maybe_correct_batch(sc, adata: ad.AnnData, batch_key: str, method: str) -> None:
+def maybe_correct_batch(adata: ad.AnnData, batch_key: str, method: str) -> None:
     if method == "none":
         adata.uns["batch_correction"] = {
             "method": "none",
@@ -145,7 +138,6 @@ def maybe_correct_batch(sc, adata: ad.AnnData, batch_key: str, method: str) -> N
 
 def main() -> None:
     args = parse_args()
-    sc = require_scanpy()
 
     input_dir = args.input_dir.expanduser().resolve()
     output_path = args.output.expanduser().resolve()
@@ -168,7 +160,7 @@ def main() -> None:
         batch_key=hvg_batch_key,
     )
     adata = adata[:, adata.var["highly_variable"]].copy()
-    maybe_correct_batch(sc, adata, args.batch_key, args.batch_correction)
+    maybe_correct_batch(adata, args.batch_key, args.batch_correction)
     sc.pp.scale(adata, max_value=10)
     sc.tl.pca(adata, svd_solver="arpack")
     sc.pp.neighbors(adata, n_pcs=args.n_pcs)
@@ -184,8 +176,8 @@ def main() -> None:
     }
 
     adata.write_h5ad(output_path)
-    save_umap(sc, adata, "leiden", plots_dir / "umap_leiden.png")
-    save_umap(sc, adata, "sample_id", plots_dir / "umap_sample_id.png")
+    save_umap(adata, "leiden", plots_dir / "umap_leiden.png")
+    save_umap(adata, "sample_id", plots_dir / "umap_sample_id.png")
 
     print(f"Wrote clustered object to {output_path}")
     print(f"Wrote UMAP plots to {plots_dir}")
