@@ -1,0 +1,55 @@
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Large or generated data
+data/*.tar
+data/*.tar.gz
+data/*.tgz
+data/*.zip
+data/flat_raw/
+data/raw/
+data/raw_h5/
+data/clean_data/
+data/processed/
+
+# References and generated analysis outputs
+reference/
+results/
+plots/
+
+# Common sequencing and count matrix files
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.bam
+*.bai
+*.sam
+*.mtx
+*.mtx.gz
+*.h5
+*.h5ad
+*.loom
+*.rds
